@@ -24,9 +24,9 @@ impl<'a> MutCursor<'a> {
         self.offset / 8
     }
 
-    /// Give the bit offset relative to the current byte of the cursor.
+    /// The offset from the start of the buffer in bits.
     pub fn bit_offset(&self) -> usize {
-        self.offset % 8
+        self.offset
     }
 
     /// Set the cursor to the given bit index.
@@ -47,6 +47,36 @@ impl<'a> MutCursor<'a> {
         Ok(())
     }
 
+    /// Create borrowed copy of the current cursor.
+    ///
+    /// Mutations on this copy affects the same buffer, but not the offset offset of the original
+    /// owner. This is useful for reverting a sequence of writes if any of them fail.
+    ///
+    /// ```
+    /// use bit_mangle::MutCursor;
+    /// let mut buf = [0; 1];
+    /// let mut cursor = MutCursor::from_slice(&mut buf);
+    ///
+    /// let mut borrowed = cursor.checkpoint();
+    /// borrowed.encode_u4(0b1001).unwrap();
+    ///
+    /// assert_eq!(borrowed.bit_offset(), 4);
+    /// assert_eq!(cursor.bit_offset(), 0);
+    ///
+    /// // Note that the data is still written to the butter
+    /// assert_eq!(buf, [0b1001_0000]);
+    ///
+    /// // To commit the write, use seek
+    /// // let offset = borrowed.offset();
+    /// // cursor.seek(offset).unwrap();
+    /// ```
+    pub fn checkpoint(&mut self) -> MutCursor<'_> {
+        MutCursor {
+            buf: self.buf,
+            offset: self.offset,
+        }
+    }
+
     fn encode_var_u8(&mut self, bits: usize, mut value: u8) -> Result<(), BufferExhausted> {
         if bits > 8 {
             panic!(
@@ -58,20 +88,29 @@ impl<'a> MutCursor<'a> {
             return Err(BufferExhausted);
         }
 
+        // Split the write across byte boundaries until all bits are consumed
         let mut rem_bits = bits;
         while rem_bits > 0 {
             let byte_offset = self.byte_offset();
-            let bit_offset = self.bit_offset();
+            let bit_offset = self.offset % 8;
 
+            // Figure out how many bits we can write before hitting a byte boundary
             let consumed_bits = (8 - bit_offset).min(rem_bits);
             rem_bits -= consumed_bits;
 
+            // Extract the top bits so we can write them and then mask them off for the next
+            // iteration
             let rem_mask = 0xffu8.checked_shr(8 - rem_bits as u32).unwrap_or(0);
             let curr_value = (value & !rem_mask) >> rem_bits;
             value &= rem_mask;
 
-            self.buf[byte_offset] |=
-                curr_value << (8 - bit_offset - consumed_bits) & 0xff >> bit_offset;
+            // Zero the memory where we write the current bits
+            let cleared_value =
+                !(0xff << (8 - consumed_bits) >> bit_offset) & self.buf[byte_offset];
+
+            // Write the current bits
+            self.buf[byte_offset] =
+                cleared_value | curr_value << (8 - bit_offset - consumed_bits) & 0xff >> bit_offset;
 
             self.offset += consumed_bits;
         }
@@ -218,6 +257,12 @@ impl_encode_i!(encode_i29, 29, i32, u32, encode_var_u32);
 impl_encode_i!(encode_i30, 30, i32, u32, encode_var_u32);
 impl_encode_i!(encode_i31, 31, i32, u32, encode_var_u32);
 impl_encode_i!(encode_i32, 32, i32, u32, encode_var_u32);
+
+impl<'a> MutCursor<'a> {
+    pub fn commit(&mut self, other: &Self) {
+        self.offset = other.offset;
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -433,4 +478,42 @@ mod tests {
     test_encode_i!(test_encode_i30, encode_i30, 30, i32);
     test_encode_i!(test_encode_i31, encode_i31, 31, i32);
     test_encode_i!(test_encode_i32, encode_i32, 32, i32);
+
+    #[test]
+    fn test_overwrite_ones() {
+        // Ensure that we don't rely on the buffer being zeroed before writing
+        let mut buf = [0xff; 2];
+        let mut cursor = MutCursor::from_slice(&mut buf);
+        cursor.skip(1).unwrap();
+        cursor.encode_u14(0).unwrap();
+        assert_eq!(buf, [0b1000_0000, 0b0000_0001]);
+    }
+
+    #[test]
+    fn test_checkpoint_with_revert() {
+        let mut buf = [0; 1];
+        let mut cursor = MutCursor::from_slice(&mut buf);
+        cursor.skip(1).unwrap();
+
+        let mut checkpoint = cursor.checkpoint();
+        checkpoint.encode_bool(true).unwrap();
+
+        cursor.encode_bool(true).unwrap();
+        assert_eq!(buf, [0b0100_0000]);
+    }
+
+    #[test]
+    fn test_checkpoint_with_commit() {
+        let mut buf = [0; 1];
+        let mut cursor = MutCursor::from_slice(&mut buf);
+        cursor.skip(1).unwrap();
+
+        let mut checkpoint = cursor.checkpoint();
+        checkpoint.encode_bool(true).unwrap();
+        let offset = checkpoint.bit_offset();
+        cursor.seek(offset).unwrap();
+
+        cursor.encode_bool(true).unwrap();
+        assert_eq!(buf, [0b0110_0000]);
+    }
 }

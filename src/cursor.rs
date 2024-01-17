@@ -1,6 +1,6 @@
 use crate::BufferExhausted;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Cursor<'a> {
     buf: &'a [u8],
     offset: usize,
@@ -24,9 +24,9 @@ impl<'a> Cursor<'a> {
         self.offset / 8
     }
 
-    /// Give the bit offset relative to the current byte of the cursor.
+    /// The offset from the start of the buffer in bits.
     pub fn bit_offset(&self) -> usize {
-        self.offset % 8
+        self.offset
     }
 
     /// Set the cursor to the given bit index.
@@ -48,7 +48,7 @@ impl<'a> Cursor<'a> {
     }
 
     fn peek_u8(&self) -> u8 {
-        let offset = self.bit_offset() as u32;
+        let offset = (self.offset % 8) as u32;
         let high = self
             .buf
             .get(self.byte_offset())
