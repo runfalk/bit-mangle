@@ -14,9 +14,14 @@ impl<'a> MutCursor<'a> {
         Self { buf, offset: 0 }
     }
 
-    /// Remaining bits in buffer
+    /// Total number of bits in buffer (includes consumed bits)
     pub fn bit_len(&self) -> usize {
-        self.buf.len() * 8 - self.offset
+        self.buf.len() * 8
+    }
+
+    /// Remaining bits in buffer
+    pub fn bits_rem(&self) -> usize {
+        self.bit_len() - self.offset
     }
 
     /// Return which byte the cursor is currently at.
@@ -31,7 +36,7 @@ impl<'a> MutCursor<'a> {
 
     /// Set the cursor to the given bit index.
     pub fn seek(&mut self, bit: usize) -> Result<(), BufferExhausted> {
-        if bit > self.bit_len() {
+        if bit >= self.bit_len() {
             return Err(BufferExhausted);
         }
         self.offset = bit;
@@ -40,7 +45,7 @@ impl<'a> MutCursor<'a> {
 
     /// Advance the cursor by the given number of bits.
     pub fn skip(&mut self, bits: usize) -> Result<(), BufferExhausted> {
-        if bits > self.bit_len() {
+        if bits > self.bits_rem() {
             return Err(BufferExhausted);
         }
         self.offset += bits;
@@ -84,7 +89,7 @@ impl<'a> MutCursor<'a> {
                 bits
             );
         }
-        if self.bit_len() < bits {
+        if self.bits_rem() < bits {
             return Err(BufferExhausted);
         }
 
@@ -124,7 +129,7 @@ impl<'a> MutCursor<'a> {
                 bits
             );
         }
-        if self.bit_len() < bits {
+        if self.bits_rem() < bits {
             return Err(BufferExhausted);
         }
         let bytes = value.to_be_bytes();
@@ -140,7 +145,7 @@ impl<'a> MutCursor<'a> {
                 bits
             );
         }
-        if self.bit_len() < bits {
+        if self.bits_rem() < bits {
             return Err(BufferExhausted);
         }
         let bytes = value.to_be_bytes();
@@ -515,5 +520,20 @@ mod tests {
 
         cursor.encode_bool(true).unwrap();
         assert_eq!(buf, [0b0110_0000]);
+    }
+
+    #[test]
+    fn test_seek() {
+        let mut buf = [0u8];
+        let mut cursor = MutCursor::from_slice(&mut buf);
+
+        assert_eq!(cursor.seek(1), Ok(()));
+        assert_eq!(cursor.bits_rem(), 7);
+
+        // This previously triggered a bug due to an invalid bounds check
+        assert_eq!(cursor.seek(7), Ok(()));
+        assert_eq!(cursor.seek(6), Ok(()));
+
+        assert_eq!(cursor.seek(8), Err(BufferExhausted));
     }
 }

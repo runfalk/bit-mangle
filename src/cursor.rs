@@ -14,9 +14,14 @@ impl<'a> Cursor<'a> {
         Self { buf, offset: 0 }
     }
 
-    /// Remaining bits in buffer
+    /// Total number of bits in buffer (includes consumed bits)
     pub fn bit_len(&self) -> usize {
-        self.buf.len() * 8 - self.offset
+        self.buf.len() * 8
+    }
+
+    /// Remaining bits in buffer
+    pub fn bits_rem(&self) -> usize {
+        self.bit_len() - self.offset
     }
 
     /// Return which byte the cursor is currently at.
@@ -31,7 +36,7 @@ impl<'a> Cursor<'a> {
 
     /// Set the cursor to the given bit index.
     pub fn seek(&mut self, bit: usize) -> Result<(), BufferExhausted> {
-        if bit > self.bit_len() {
+        if bit >= self.bit_len() {
             return Err(BufferExhausted);
         }
         self.offset = bit;
@@ -40,7 +45,7 @@ impl<'a> Cursor<'a> {
 
     /// Advance the cursor by the given number of bits.
     pub fn skip(&mut self, bits: usize) -> Result<(), BufferExhausted> {
-        if bits > self.bit_len() {
+        if bits > self.bits_rem() {
             return Err(BufferExhausted);
         }
         self.offset += bits;
@@ -92,6 +97,16 @@ impl<'a> Cursor<'a> {
 
     pub fn decode_bool(&mut self) -> Result<bool, BufferExhausted> {
         self.decode_u1().map(|n| n > 0)
+    }
+
+    pub fn peek<F: FnOnce(&mut Self) -> Result<T, BufferExhausted>, T>(
+        &mut self,
+        f: F,
+    ) -> Result<T, BufferExhausted> {
+        let offset = self.bit_offset();
+        let rv = f(self)?;
+        self.seek(offset)?;
+        Ok(rv)
     }
 }
 
@@ -271,14 +286,14 @@ mod tests {
     fn test_bit_len_and_skip() {
         let buf = [0u8; 10];
 
-        assert_eq!(Cursor::from_slice(&buf).bit_len(), 80);
-        assert_eq!(Cursor::from_slice(&buf[..5]).bit_len(), 40);
+        assert_eq!(Cursor::from_slice(&buf).bits_rem(), 80);
+        assert_eq!(Cursor::from_slice(&buf[..5]).bits_rem(), 40);
 
         let mut offset_buf = Cursor::from_slice(&buf);
         offset_buf.skip(7).unwrap();
-        assert_eq!(offset_buf.bit_len(), 73);
+        assert_eq!(offset_buf.bits_rem(), 73);
         offset_buf.skip(2).unwrap();
-        assert_eq!(offset_buf.bit_len(), 71);
+        assert_eq!(offset_buf.bits_rem(), 71);
 
         assert_eq!(offset_buf.skip(72), Err(BufferExhausted));
     }
@@ -334,7 +349,7 @@ mod tests {
         assert_eq!(cursor.decode_u1(), Ok(1));
         assert_eq!(cursor.decode_u1(), Ok(0));
 
-        assert_eq!(cursor.bit_len(), 0);
+        assert_eq!(cursor.bits_rem(), 0);
 
         let buf = [0b1111_0000u8];
         let mut cursor = Cursor::from_slice(&buf);
@@ -348,7 +363,7 @@ mod tests {
         assert_eq!(cursor.decode_u1(), Ok(0));
         assert_eq!(cursor.decode_u1(), Ok(0));
 
-        assert_eq!(cursor.bit_len(), 0);
+        assert_eq!(cursor.bits_rem(), 0);
     }
 
     #[test]
@@ -358,7 +373,7 @@ mod tests {
 
         cursor.skip(7).unwrap();
         assert_eq!(cursor.decode_u2(), Ok(0b11));
-        assert_eq!(cursor.bit_len(), 7);
+        assert_eq!(cursor.bits_rem(), 7);
     }
 
     #[test]
@@ -368,7 +383,7 @@ mod tests {
 
         cursor.skip(6).unwrap();
         assert_eq!(cursor.decode_u3(), Ok(0b101));
-        assert_eq!(cursor.bit_len(), 7);
+        assert_eq!(cursor.bits_rem(), 7);
     }
 
     #[test]
@@ -378,7 +393,7 @@ mod tests {
 
         cursor.skip(5).unwrap();
         assert_eq!(cursor.decode_u4(), Ok(0b1001));
-        assert_eq!(cursor.bit_len(), 7);
+        assert_eq!(cursor.bits_rem(), 7);
     }
 
     #[test]
@@ -388,7 +403,7 @@ mod tests {
 
         cursor.skip(4).unwrap();
         assert_eq!(cursor.decode_u5(), Ok(0b1_0001));
-        assert_eq!(cursor.bit_len(), 7);
+        assert_eq!(cursor.bits_rem(), 7);
     }
 
     #[test]
@@ -398,7 +413,7 @@ mod tests {
 
         cursor.skip(3).unwrap();
         assert_eq!(cursor.decode_u6(), Ok(0b10_0001));
-        assert_eq!(cursor.bit_len(), 7);
+        assert_eq!(cursor.bits_rem(), 7);
     }
 
     #[test]
@@ -408,7 +423,7 @@ mod tests {
 
         cursor.skip(2).unwrap();
         assert_eq!(cursor.decode_u7(), Ok(0b100_0001));
-        assert_eq!(cursor.bit_len(), 7);
+        assert_eq!(cursor.bits_rem(), 7);
     }
 
     #[test]
@@ -418,7 +433,7 @@ mod tests {
 
         cursor.skip(1).unwrap();
         assert_eq!(cursor.decode_u8(), Ok(0b1000_0001));
-        assert_eq!(cursor.bit_len(), 7);
+        assert_eq!(cursor.bits_rem(), 7);
     }
 
     #[test]
@@ -428,6 +443,39 @@ mod tests {
 
         cursor.skip(1).unwrap();
         assert_eq!(cursor.decode_u9(), Ok(0b1_0000_0001));
-        assert_eq!(cursor.bit_len(), 6);
+        assert_eq!(cursor.bits_rem(), 6);
+    }
+
+    #[test]
+    fn test_seek() {
+        let buf = [0u8];
+        let mut cursor = Cursor::from_slice(&buf);
+
+        assert_eq!(cursor.seek(1), Ok(()));
+        assert_eq!(cursor.bits_rem(), 7);
+
+        // This previously triggered a bug due to an invalid bounds check
+        assert_eq!(cursor.seek(7), Ok(()));
+        assert_eq!(cursor.seek(6), Ok(()));
+
+        assert_eq!(cursor.seek(8), Err(BufferExhausted));
+    }
+
+    #[test]
+    fn test_peek() {
+        let buf = [1u8];
+        let mut cursor = Cursor::from_slice(&buf);
+
+        assert_eq!(cursor.bit_offset(), 0);
+        assert_eq!(cursor.peek(Cursor::decode_u8), Ok(1u8));
+        assert_eq!(cursor.bit_offset(), 0);
+
+        cursor.skip(4).unwrap();
+
+        assert_eq!(cursor.bit_offset(), 4);
+        assert_eq!(cursor.peek(Cursor::decode_u4), Ok(1u8));
+        assert_eq!(cursor.bit_offset(), 4);
+
+        assert_eq!(cursor.peek(Cursor::decode_u5), Err(BufferExhausted));
     }
 }
